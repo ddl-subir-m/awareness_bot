@@ -271,108 +271,6 @@ class DatabaseManager:
             finally:
                 conn.close()
 
-def save_summary(self, user_id: str, timeframe: str, summary: Dict) -> None:
-    """Save a new memory summary"""
-    with self.lock:
-        conn = self.get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-            INSERT INTO memory_summaries 
-            (user_id, timeframe, summary, start_date, end_date, last_updated)
-            VALUES (?, ?, ?, datetime('now', '-1 day'), datetime('now'), datetime('now'))
-            """, (user_id, timeframe, json.dumps(summary)))
-            conn.commit()
-        finally:
-            conn.close()
-
-def get_latest_summary(self, user_id: str, timeframe: str) -> Optional[Dict]:
-    """Get the most recent summary for a timeframe"""
-    with self.lock:
-        conn = self.get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-            SELECT summary, last_updated
-            FROM memory_summaries
-            WHERE user_id = ? AND timeframe = ?
-            ORDER BY last_updated DESC
-            LIMIT 1
-            """, (user_id, timeframe))
-            result = cursor.fetchone()
-            
-            if result:
-                return {
-                    "summary": json.loads(result[0]),
-                    "last_updated": result[1]
-                }
-            return None
-        finally:
-            conn.close()
-
-def get_conversations_for_timeframe(self, user_id: str, timeframe: str) -> List[Dict]:
-    """Get conversations for a specific timeframe"""
-    timeframe_sql = {
-        "daily": "datetime('now', '-1 day')",
-        "weekly": "datetime('now', '-7 days')"
-    }
-    
-    with self.lock:
-        conn = self.get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(f"""
-            SELECT role, content
-            FROM conversations
-            WHERE user_id = ? AND timestamp >= {timeframe_sql[timeframe]}
-            ORDER BY timestamp ASC
-            """, (user_id,))
-            
-            return [{"role": role, "content": content} for role, content in cursor.fetchall()]
-        finally:
-            conn.close()
-
-def get_all_summaries(self, user_id: str) -> List[Dict]:
-    """Get all summaries for a user"""
-    with self.lock:
-        conn = self.get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-            SELECT timeframe, summary, start_date, end_date, last_updated
-            FROM memory_summaries
-            WHERE user_id = ?
-            ORDER BY last_updated DESC
-            """, (user_id,))
-            
-            results = cursor.fetchall()
-            return [{
-                "timeframe": result[0],
-                "summary": json.loads(result[1]),
-                "start_date": result[2],
-                "end_date": result[3],
-                "last_updated": result[4]
-            } for result in results]
-        finally:
-            conn.close()
-            
-    def reset_database(self):
-        """Reset the database by dropping and recreating tables"""
-        with self.lock:
-            conn = self.get_connection()
-            try:
-                cursor = conn.cursor()
-                # Drop existing tables
-                cursor.execute("DROP TABLE IF EXISTS conversations")
-                cursor.execute("DROP TABLE IF EXISTS users")
-                cursor.execute("DROP TABLE IF EXISTS memory_summaries")
-                conn.commit()
-                
-                # Reinitialize database
-                self._init_db()
-            finally:
-                conn.close()
-
     def save_summary(self, user_id: str, timeframe: str, summary: Dict) -> None:
         """Save a new memory summary"""
         with self.lock:
@@ -433,3 +331,44 @@ def get_all_summaries(self, user_id: str) -> List[Dict]:
                 return [{"role": role, "content": content} for role, content in cursor.fetchall()]
             finally:
                 conn.close()
+
+    def get_all_summaries(self, user_id: str) -> List[Dict]:
+        """Get all summaries for a user"""
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("""
+                SELECT timeframe, summary, start_date, end_date, last_updated
+                FROM memory_summaries
+                WHERE user_id = ?
+                ORDER BY last_updated DESC
+                """, (user_id,))
+                
+                results = cursor.fetchall()
+                return [{
+                    "timeframe": result[0],
+                    "summary": json.loads(result[1]),
+                    "start_date": result[2],
+                    "end_date": result[3],
+                    "last_updated": result[4]
+                } for result in results]
+            finally:
+                conn.close()
+            
+    def reset_database(self):
+        """Reset the database by dropping and recreating tables"""
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                # Drop existing tables
+                cursor.execute("DROP TABLE IF EXISTS conversations")
+                cursor.execute("DROP TABLE IF EXISTS users")
+                cursor.execute("DROP TABLE IF EXISTS memory_summaries")
+                conn.commit()
+                
+                # Reinitialize database
+                self._init_db()
+            finally:
+                conn.close()  

@@ -1,3 +1,4 @@
+import streamlit as st
 # Define prompts with emojis and descriptions
 NERVOUS_SYSTEM_PROMPTS = {
     "edge_challenge": {
@@ -40,7 +41,11 @@ ADDITIONAL_PROMPTS = {
     }
 }
 
-DEFAULT_INSTRUCTIONS = """Don't worry about formalities. Weave in playful humour when you see an opportunity. Exude delightful, soulful + {st.session_state.coach_vibes or '[coach_vibes]'} vibes.
+def get_default_instructions():
+    """Get default instructions with current coach vibes from session state"""
+    coach_vibes = st.session_state.get('coach_vibes', '[coach_vibes]')
+    
+    return f"""Don't worry about formalities. Weave in playful humour when you see an opportunity. Exude delightful, soulful + {coach_vibes} vibes.
 
 Take however smart you are & write in the same style but as if you were +3sd smarter.
 

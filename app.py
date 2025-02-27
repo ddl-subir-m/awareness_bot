@@ -1,13 +1,15 @@
 import streamlit as st
-import json
-import os
-import uuid
 import openai
 from pathlib import Path
-from prompts import NERVOUS_SYSTEM_PROMPTS, ADDITIONAL_PROMPTS, DEFAULT_INSTRUCTIONS
+from prompts import NERVOUS_SYSTEM_PROMPTS, ADDITIONAL_PROMPTS, get_default_instructions
 from custom_css import css
 from database import DatabaseManager
 from memory_processor import MemoryProcessor
+from logging_config import setup_logging
+import logging
+
+# Configure logging
+logger = setup_logging()
 
 # Set page configuration
 st.set_page_config(
@@ -89,8 +91,8 @@ def get_ai_response(prompt, model="gpt-4o-mini"):
             for item in context.get("items", []):
                 context_str += f"- {item['content']} (relevance: {item['relevance_score']}/10)\n"
             messages.append({
-                "role": "system",
-                "content": context_str
+                "role": "assistant",
+                "content": f"Let me recall our previous discussions: {context_str}"
             })
         
         # Add recent conversation history
@@ -105,6 +107,15 @@ def get_ai_response(prompt, model="gpt-4o-mini"):
             "role": "user",
             "content": prompt
         })
+
+        # Log the messages being sent (fixed version)
+        logger.info("Sending messages to OpenAI API from get_ai_response:")
+        logger.info(f"Total messages: {len(messages)}")
+        if logger.isEnabledFor(logging.DEBUG):
+            for idx, msg in enumerate(messages):
+                logger.info(f"Message {idx + 1}:")
+                logger.info(f"Role: {msg['role']}")
+                logger.info(f"Content: {msg['content']}\n")
         
         # Get response using the stored client
         response = st.session_state.openai_client.chat.completions.create(
@@ -114,7 +125,11 @@ def get_ai_response(prompt, model="gpt-4o-mini"):
             max_tokens=1500
         )
         
-        # Process conversation for memory after getting response
+        # Update conversation history in session state
+        st.session_state.conversation_history.append({"role": "user", "content": prompt})
+        st.session_state.conversation_history.append({"role": "assistant", "content": response.choices[0].message.content})
+        
+        # Process conversation for memory
         memory_processor.process_conversation(
             st.session_state.user_id,
             {"role": "user", "content": prompt}
@@ -123,6 +138,7 @@ def get_ai_response(prompt, model="gpt-4o-mini"):
         return response.choices[0].message.content
         
     except Exception as e:
+        logger.error(f"Error in get_ai_response: {str(e)}")
         return f"Error communicating with AI service: {str(e)}"
 
 # Replace profile loading function
@@ -324,10 +340,6 @@ Fill in the blanks in this template to create your personalized AI coach.
                          caption="Your AI Nervous System Coach", 
                          width=300)
             
-            def get_default_instructions():
-                return f"""Your name is {st.session_state.coach_name or '[coach_name]'}, and you are my Nervous System AI Coach.
-                {DEFAULT_INSTRUCTIONS}"""
-
             # Initialize or update the template
             if not st.session_state.template_initialized:
                 st.session_state.custom_instructions = get_default_instructions()
