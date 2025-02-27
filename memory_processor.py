@@ -7,7 +7,7 @@ class MemoryProcessor:
     def __init__(self, api_key: str, db_manager):
         self.api_key = api_key
         self.db = db_manager
-        openai.api_key = api_key
+        self.client = openai.OpenAI(api_key=api_key)
 
     def process_conversation(self, user_id: str, conversation: Dict) -> None:
         """Process a new conversation and update memory summaries"""
@@ -75,7 +75,7 @@ class MemoryProcessor:
         """
 
         try:
-            response = openai.ChatCompletion.create(
+            response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": "You are an expert at analyzing conversations and extracting meaningful patterns."},
@@ -106,7 +106,7 @@ class MemoryProcessor:
         """
 
         try:
-            response = openai.ChatCompletion.create(
+            response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": "You are an expert at finding relevant context in conversation histories."},
@@ -147,7 +147,7 @@ class MemoryProcessor:
         """
 
         try:
-            response = openai.ChatCompletion.create(
+            response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {
