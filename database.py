@@ -1,14 +1,18 @@
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
+import logging
 from threading import Lock
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
+
+logger = logging.getLogger('nervous_system_coach')
 
 class DatabaseManager:
-    def __init__(self):
-        self.db_path = "nervous_system_coach.db"
+    def __init__(self, db_path="nervous_system_coach.db"):
+        self.db_path = db_path
         self.lock = Lock()
+        self.logger = logging.getLogger('nervous_system_coach.db')
         self._init_db()
     
     def get_connection(self):
@@ -49,7 +53,7 @@ class DatabaseManager:
                 )
                 """)
 
-                # Add new Memory Summaries table
+                # Memory Summaries table
                 cursor.execute("""
                 CREATE TABLE IF NOT EXISTS memory_summaries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,6 +63,95 @@ class DatabaseManager:
                     start_date DATETIME,
                     end_date DATETIME,
                     last_updated DATETIME,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id)
+                )
+                """)
+                
+                # Add new tables for enhanced context management
+                
+                # User Insights table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_insights (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT,
+                    category TEXT,
+                    content TEXT,
+                    confidence FLOAT,
+                    source_message_ids TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    last_validated DATETIME,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id)
+                )
+                """)
+                
+                # Topics table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS topics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT,
+                    name TEXT,
+                    relevance_score FLOAT,
+                    first_mentioned DATETIME,
+                    last_mentioned DATETIME,
+                    mention_count INTEGER DEFAULT 1,
+                    is_resolved BOOLEAN DEFAULT 0,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id)
+                )
+                """)
+                
+                # Progress Metrics table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS progress_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT,
+                    metric_name TEXT,
+                    value FLOAT,
+                    recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    notes TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id)
+                )
+                """)
+                
+                # Action Items table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS action_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT,
+                    content TEXT,
+                    source_message_id INTEGER,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT DEFAULT 'pending',
+                    completed_at DATETIME,
+                    FOREIGN KEY (user_id) REFERENCES users (user_id),
+                    FOREIGN KEY (source_message_id) REFERENCES conversations (id)
+                )
+                """)
+                
+                # Message Analysis table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS message_analysis (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id INTEGER,
+                    user_id TEXT,
+                    intent TEXT,
+                    emotional_state TEXT,
+                    urgency_level INTEGER,
+                    topics TEXT,
+                    potential_triggers TEXT,
+                    FOREIGN KEY (message_id) REFERENCES conversations (id),
+                    FOREIGN KEY (user_id) REFERENCES users (user_id)
+                )
+                """)
+                
+                # Session tracking table
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT,
+                    start_time DATETIME,
+                    end_time DATETIME,
+                    message_count INTEGER DEFAULT 0,
+                    summary TEXT,
                     FOREIGN KEY (user_id) REFERENCES users (user_id)
                 )
                 """)
@@ -148,48 +241,65 @@ class DatabaseManager:
             finally:
                 conn.close()
 
-    def save_conversation(self, user_id, role, content):
-        """Save a conversation message"""
+    def save_conversation(self, user_id: str, role: str, content: str) -> int:
+        """Save a conversation message if it doesn't already exist"""
         with self.lock:
             conn = self.get_connection()
             try:
                 cursor = conn.cursor()
+                
+                # Enhanced duplicate detection - check content similarity and timing
                 cursor.execute("""
-                INSERT INTO conversations (user_id, role, content)
-                VALUES (?, ?, ?)
+                SELECT id, content 
+                FROM conversations 
+                WHERE user_id = ? 
+                AND role = ? 
+                AND timestamp >= datetime('now', '-1 minute')
+                ORDER BY timestamp DESC
+                LIMIT 5
+                """, (user_id, role))
+                
+                recent_messages = cursor.fetchall()
+                
+                # Check for exact or near duplicates
+                for msg_id, msg_content in recent_messages:
+                    if (
+                        content == msg_content or  # Exact match
+                        (len(content) > 10 and content in msg_content) or  # Substring match for longer messages
+                        (len(msg_content) > 10 and msg_content in content)  # Reverse substring match
+                    ):
+                        return msg_id  # Return existing message ID
+                
+                # Insert new message if no duplicate found
+                cursor.execute("""
+                INSERT INTO conversations (user_id, role, content, timestamp)
+                VALUES (?, ?, ?, datetime('now'))
                 """, (user_id, role, content))
+                
                 conn.commit()
-                # Debug print
-                print(f"Saved message for user {user_id}: role={role}, content={content}")
+                return cursor.lastrowid
             finally:
                 conn.close()
 
-    def get_conversation_history(self, user_id):
-        """Get conversation history for a user"""
+    def get_conversation_history(self, user_id: str) -> List[Dict[str, Any]]:
+        """Get conversation history for a user with proper timestamp handling"""
         with self.lock:
             conn = self.get_connection()
             try:
                 cursor = conn.cursor()
-                # Debug print
-                print(f"Fetching conversation history for user {user_id}")
-                
                 cursor.execute("""
-                SELECT role, content 
-                FROM conversations 
-                WHERE user_id = ? AND role IS NOT NULL AND content IS NOT NULL
-                ORDER BY timestamp ASC
+                    SELECT role, content, timestamp
+                    FROM conversations
+                    WHERE user_id = ?
+                    ORDER BY timestamp ASC
                 """, (user_id,))
                 
                 results = cursor.fetchall()
-                # Debug print
-                print(f"Found {len(results)} messages in database")
-                
-                # Only return messages that have both role and content
-                return [
-                    {"role": role, "content": content} 
-                    for role, content in results 
-                    if role and content
-                ]
+                return [{
+                    "role": row[0],
+                    "content": row[1],
+                    "timestamp": row[2] if row[2] else datetime.now().isoformat()
+                } for row in results]
             finally:
                 conn.close()
 
@@ -311,24 +421,48 @@ class DatabaseManager:
                 conn.close()
 
     def get_conversations_for_timeframe(self, user_id: str, timeframe: str) -> List[Dict]:
-        """Get conversations for a specific timeframe"""
-        timeframe_sql = {
-            "daily": "datetime('now', '-1 day')",
-            "weekly": "datetime('now', '-7 days')"
-        }
+        """Get conversations for a specific timeframe with improved date handling"""
+        # Get current time for consistency across the method
+        current_time = datetime.now()
+        
+        # Define timeframes clearly using date-only comparison
+        if timeframe == "daily":
+            # Get conversations from the previous day
+            start_time = (current_time - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            end_time = current_time.replace(hour=23, minute=59, second=59, microsecond=999999)
+            logger.info(f"Getting daily conversations from {start_time} to {end_time}")
+        elif timeframe == "weekly":
+            # Get conversations from the past 7 days
+            start_time = (current_time - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+            end_time = current_time.replace(hour=23, minute=59, second=59, microsecond=999999)
+            logger.info(f"Getting weekly conversations from {start_time} to {end_time}")
+        else:
+            raise ValueError(f"Unsupported timeframe: {timeframe}")
+        
+        # Format for SQLite
+        start_time_str = start_time.strftime("%Y-%m-%d %H:%M:%S")
+        end_time_str = end_time.strftime("%Y-%m-%d %H:%M:%S")
         
         with self.lock:
             conn = self.get_connection()
             try:
                 cursor = conn.cursor()
-                cursor.execute(f"""
-                SELECT role, content
-                FROM conversations
-                WHERE user_id = ? AND timestamp >= {timeframe_sql[timeframe]}
-                ORDER BY timestamp ASC
-                """, (user_id,))
+                cursor.execute("""
+                    SELECT role, content, timestamp
+                    FROM conversations
+                    WHERE user_id = ? 
+                    AND timestamp BETWEEN ? AND ?
+                    ORDER BY timestamp ASC
+                """, (user_id, start_time_str, end_time_str))
                 
-                return [{"role": role, "content": content} for role, content in cursor.fetchall()]
+                results = cursor.fetchall()
+                logger.info(f"Found {len(results)} conversations for {timeframe} timeframe")
+                
+                if results:
+                    timestamps = [row[2] for row in results]
+                    logger.debug(f"Conversation timestamps: {timestamps[:3]}{'...' if len(timestamps) > 3 else ''}")
+                
+                return [{"role": role, "content": content} for role, content, _ in results if role and content]
             finally:
                 conn.close()
 
@@ -372,3 +506,612 @@ class DatabaseManager:
                 self._init_db()
             finally:
                 conn.close()  
+
+    def save_user_insight(self, user_id: str, category: str, content: str, 
+                        confidence: float, source_message_ids: List[int]) -> int:
+        """Save a new insight about the user"""
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("""
+                INSERT INTO user_insights (
+                    user_id, category, content, confidence, source_message_ids, created_at
+                ) VALUES (?, ?, ?, ?, ?, datetime('now'))
+                """, (
+                    user_id, category, content, confidence, 
+                    json.dumps(source_message_ids)
+                ))
+                conn.commit()
+                return cursor.lastrowid
+            finally:
+                conn.close()
+    
+    def get_user_insights(self, user_id: str, categories: Optional[List[str]] = None, 
+                         min_confidence: float = 0.5) -> List[Dict[str, Any]]:
+        """Get insights about a user, optionally filtered by category and confidence"""
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                query = """
+                SELECT id, category, content, confidence, created_at, last_validated
+                FROM user_insights
+                WHERE user_id = ? AND confidence >= ?
+                """
+                params = [user_id, min_confidence]
+                
+                if categories:
+                    placeholders = ', '.join('?' for _ in categories)
+                    query += f" AND category IN ({placeholders})"
+                    params.extend(categories)
+                
+                query += " ORDER BY confidence DESC, created_at DESC"
+                
+                cursor.execute(query, params)
+                
+                results = cursor.fetchall()
+                return [
+                    {
+                        "id": row[0],
+                        "category": row[1],
+                        "content": row[2],
+                        "confidence": row[3],
+                        "created_at": row[4],
+                        "last_validated": row[5]
+                    }
+                    for row in results
+                ]
+            finally:
+                conn.close()
+    
+    def update_or_create_topic(self, user_id: str, topic_name: str, 
+                              relevance_score: float) -> int:
+        """Update an existing topic or create a new one with deduplication"""
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                # Normalize topic name for comparison
+                normalized_name = topic_name.lower().strip()
+                
+                # Check for similar topics
+                cursor.execute("""
+                SELECT id, name, mention_count, relevance_score
+                FROM topics
+                WHERE user_id = ? AND LOWER(name) = ?
+                """, (user_id, normalized_name))
+                
+                result = cursor.fetchone()
+                
+                if result:
+                    # Update existing topic
+                    topic_id, name, mention_count, old_relevance = result
+                    new_mention_count = mention_count + 1
+                    
+                    # Calculate new relevance score as weighted average
+                    new_relevance = (old_relevance * mention_count + relevance_score) / new_mention_count
+                    
+                    cursor.execute("""
+                    UPDATE topics
+                    SET mention_count = ?, 
+                        relevance_score = ?, 
+                        last_mentioned = datetime('now'),
+                        name = CASE 
+                            WHEN LENGTH(?) > LENGTH(name) THEN ?
+                            ELSE name
+                        END
+                    WHERE id = ?
+                    """, (new_mention_count, new_relevance, topic_name, topic_name, topic_id))
+                    
+                    conn.commit()
+                    return topic_id
+                else:
+                    # Create new topic
+                    cursor.execute("""
+                    INSERT INTO topics (
+                        user_id, name, relevance_score, first_mentioned, last_mentioned
+                    ) VALUES (?, ?, ?, datetime('now'), datetime('now'))
+                    """, (user_id, topic_name, relevance_score))
+                    
+                    conn.commit()
+                    return cursor.lastrowid
+            finally:
+                conn.close()
+    
+    def get_active_topics(self, user_id: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Get the most active topics for a user"""
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                # Get topics mentioned in the last 7 days or with highest mention count
+                cursor.execute("""
+                SELECT name, relevance_score, first_mentioned, last_mentioned, mention_count, is_resolved
+                FROM topics
+                WHERE user_id = ? AND (
+                    last_mentioned >= datetime('now', '-7 days') OR
+                    mention_count >= 3
+                )
+                ORDER BY relevance_score * mention_count DESC, last_mentioned DESC
+                LIMIT ?
+                """, (user_id, limit))
+                
+                results = cursor.fetchall()
+                return [
+                    {
+                        "name": row[0],
+                        "relevance": row[1],
+                        "first_mentioned": row[2],
+                        "last_mentioned": row[3],
+                        "mention_count": row[4],
+                        "is_resolved": bool(row[5])
+                    }
+                    for row in results
+                ]
+            finally:
+                conn.close()
+    
+    def save_message_analysis(self, message_id: int, user_id: str, 
+                             analysis: Dict[str, Any]) -> int:
+        """Save analysis of a user message"""
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                # Extract fields from analysis dict
+                intent = analysis.get('primary_intent', '')
+                emotional_state = analysis.get('emotional_state', '')
+                urgency_level = analysis.get('urgency_level', 5)
+                topics = json.dumps(analysis.get('topics', []))
+                potential_triggers = analysis.get('potential_triggers', '')
+                
+                cursor.execute("""
+                INSERT INTO message_analysis (
+                    message_id, user_id, intent, emotional_state, urgency_level, topics, potential_triggers
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    message_id, user_id, intent, emotional_state, 
+                    urgency_level, topics, potential_triggers
+                ))
+                
+                conn.commit()
+                return cursor.lastrowid
+            finally:
+                conn.close()
+    
+    def get_message_analysis(self, user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get recent message analyses for a user"""
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                SELECT ma.id, c.content as message_content, ma.intent, ma.emotional_state, 
+                       ma.urgency_level, ma.topics, ma.potential_triggers, c.timestamp
+                FROM message_analysis ma
+                JOIN conversations c ON ma.message_id = c.id
+                WHERE ma.user_id = ? AND c.role = 'user'
+                ORDER BY c.timestamp DESC
+                LIMIT ?
+                """, (user_id, limit))
+                
+                results = cursor.fetchall()
+                return [
+                    {
+                        "id": row[0],
+                        "message_content": row[1],
+                        "intent": row[2],
+                        "emotional_state": row[3],
+                        "urgency_level": row[4],
+                        "topics": json.loads(row[5]),
+                        "potential_triggers": row[6],
+                        "timestamp": row[7]
+                    }
+                    for row in results
+                ]
+            finally:
+                conn.close()
+    
+    def save_action_item(self, user_id: str, content: str, 
+                        source_message_id: int) -> int:
+        """Save a new action item"""
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                INSERT INTO action_items (
+                    user_id, content, source_message_id
+                ) VALUES (?, ?, ?)
+                """, (user_id, content, source_message_id))
+                
+                conn.commit()
+                return cursor.lastrowid
+            finally:
+                conn.close()
+    
+    def get_pending_action_items(self, user_id: str) -> List[Dict[str, Any]]:
+        """Get pending action items for a user"""
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                SELECT id, content, created_at
+                FROM action_items
+                WHERE user_id = ? AND status = 'pending'
+                ORDER BY created_at DESC
+                """, (user_id,))
+                
+                results = cursor.fetchall()
+                return [
+                    {
+                        "id": row[0],
+                        "content": row[1],
+                        "created_at": row[2]
+                    }
+                    for row in results
+                ]
+            finally:
+                conn.close()
+    
+    def update_action_item_status(self, item_id: int, status: str, 
+                                completed_at: Optional[str] = None) -> bool:
+        """Update an action item's status"""
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                if completed_at:
+                    cursor.execute("""
+                    UPDATE action_items
+                    SET status = ?, completed_at = ?
+                    WHERE id = ?
+                    """, (status, completed_at, item_id))
+                else:
+                    cursor.execute("""
+                    UPDATE action_items
+                    SET status = ?
+                    WHERE id = ?
+                    """, (status, item_id))
+                
+                conn.commit()
+                return cursor.rowcount > 0
+            finally:
+                conn.close()
+    
+    def save_progress_metric(self, user_id: str, metric_name: str, 
+                           value: float, notes: Optional[str] = None) -> int:
+        """Save a progress metric value"""
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                INSERT INTO progress_metrics (
+                    user_id, metric_name, value, notes
+                ) VALUES (?, ?, ?, ?)
+                """, (user_id, metric_name, value, notes))
+                
+                conn.commit()
+                return cursor.lastrowid
+            finally:
+                conn.close()
+    
+    def get_metric_history(self, user_id: str, metric_name: str, 
+                         days: int = 30) -> List[Dict[str, Any]]:
+        """Get historical values for a specific metric"""
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                SELECT value, recorded_at, notes
+                FROM progress_metrics
+                WHERE user_id = ? AND metric_name = ? AND recorded_at >= datetime('now', '-' || ? || ' days')
+                ORDER BY recorded_at ASC
+                """, (user_id, metric_name, days))
+                
+                results = cursor.fetchall()
+                return [
+                    {
+                        "value": row[0],
+                        "recorded_at": row[1],
+                        "notes": row[2]
+                    }
+                    for row in results
+                ]
+            finally:
+                conn.close()
+    
+    def get_current_session_id(self, user_id: str) -> Optional[int]:
+        """Get the current session ID or create a new one if needed"""
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                # Check for an active session (less than 30 minutes old)
+                cursor.execute("""
+                SELECT id, start_time
+                FROM sessions
+                WHERE user_id = ? AND end_time IS NULL
+                ORDER BY start_time DESC
+                LIMIT 1
+                """, (user_id,))
+                
+                result = cursor.fetchone()
+                current_time = datetime.now()
+                
+                if result:
+                    session_id, start_time = result
+                    start_time = datetime.fromisoformat(start_time)
+                    
+                    # Check if session is still active (less than 30 minutes since last activity)
+                    cursor.execute("""
+                    SELECT MAX(timestamp) 
+                    FROM conversations 
+                    WHERE user_id = ?
+                    """, (user_id,))
+                    
+                    last_message_time = cursor.fetchone()[0]
+                    
+                    if last_message_time:
+                        last_message_time = datetime.fromisoformat(last_message_time)
+                        time_diff = (current_time - last_message_time).total_seconds() / 60
+                        
+                        if time_diff <= 30:  # Session still active
+                            return session_id
+                
+                # Create a new session
+                cursor.execute("""
+                INSERT INTO sessions (
+                    user_id, start_time
+                ) VALUES (?, ?)
+                """, (user_id, current_time.isoformat()))
+                
+                conn.commit()
+                return cursor.lastrowid
+            finally:
+                conn.close()
+    
+    def end_session(self, session_id: int, summary: Optional[str] = None) -> bool:
+        """End a session and optionally add a summary"""
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                # Update message count
+                cursor.execute("""
+                SELECT user_id FROM sessions WHERE id = ?
+                """, (session_id,))
+                result = cursor.fetchone()
+                
+                if not result:
+                    return False
+                    
+                user_id = result[0]
+                
+                # Count messages in this session
+                cursor.execute("""
+                SELECT COUNT(*) FROM conversations
+                WHERE user_id = ? AND timestamp >= (SELECT start_time FROM sessions WHERE id = ?)
+                """, (user_id, session_id))
+                
+                message_count = cursor.fetchone()[0]
+                
+                # End the session
+                end_time = datetime.now().isoformat()
+                cursor.execute("""
+                UPDATE sessions
+                SET end_time = ?, message_count = ?, summary = ?
+                WHERE id = ?
+                """, (end_time, message_count, summary, session_id))
+                
+                conn.commit()
+                return True
+            finally:
+                conn.close()
+
+
+
+    def get_insights_for_timeframe(self, user_id: str, timeframe: str) -> List[Dict[str, Any]]:
+        """
+        Get insights created within a specific timeframe
+        
+        Args:
+            user_id: The user's ID
+            timeframe: 'daily' or 'weekly'
+            
+        Returns:
+            List of insights from this timeframe
+        """
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                # Calculate the start time based on timeframe
+                if timeframe == "daily":
+                    time_ago = "1 day"
+                elif timeframe == "weekly":
+                    time_ago = "7 days"
+                else:
+                    raise ValueError(f"Unsupported timeframe: {timeframe}")
+                
+                cursor.execute("""
+                SELECT id, category, content, confidence, created_at
+                FROM user_insights
+                WHERE user_id = ? 
+                AND created_at >= datetime('now', '-' || ?)
+                ORDER BY confidence DESC, created_at DESC
+                """, (user_id, time_ago))
+                
+                results = cursor.fetchall()
+                return [
+                    {
+                        "id": row[0],
+                        "category": row[1],
+                        "content": row[2],
+                        "confidence": row[3],
+                        "created_at": row[4]
+                    }
+                    for row in results
+                ]
+            finally:
+                conn.close()
+
+    def get_action_items_for_timeframe(self, user_id: str, timeframe: str) -> List[Dict[str, Any]]:
+        """
+        Get action items created within a specific timeframe
+        
+        Args:
+            user_id: The user's ID
+            timeframe: 'daily' or 'weekly'
+            
+        Returns:
+            List of action items from this timeframe
+        """
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                # Calculate the start time based on timeframe
+                if timeframe == "daily":
+                    time_ago = "1 day"
+                elif timeframe == "weekly":
+                    time_ago = "7 days"
+                else:
+                    raise ValueError(f"Unsupported timeframe: {timeframe}")
+                
+                cursor.execute("""
+                SELECT id, content, created_at, status
+                FROM action_items
+                WHERE user_id = ? 
+                AND created_at >= datetime('now', '-' || ?)
+                ORDER BY created_at DESC
+                """, (user_id, time_ago))
+                
+                results = cursor.fetchall()
+                return [
+                    {
+                        "id": row[0],
+                        "content": row[1],
+                        "created_at": row[2],
+                        "status": row[3]
+                    }
+                    for row in results
+                ]
+            finally:
+                conn.close()
+
+    def get_emotional_metrics_for_timeframe(self, user_id: str, timeframe: str) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Get emotional metrics recorded within a specific timeframe
+        
+        Args:
+            user_id: The user's ID
+            timeframe: 'daily' or 'weekly'
+            
+        Returns:
+            Dictionary of metric names to lists of metric values
+        """
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                # Calculate the start time based on timeframe
+                if timeframe == "daily":
+                    time_ago = "1 day"
+                elif timeframe == "weekly":
+                    time_ago = "7 days"
+                else:
+                    raise ValueError(f"Unsupported timeframe: {timeframe}")
+                
+                # Get all metrics from the last day/week
+                cursor.execute("""
+                SELECT metric_name, value, recorded_at, notes
+                FROM progress_metrics
+                WHERE user_id = ? 
+                AND recorded_at >= datetime('now', '-' || ?)
+                ORDER BY recorded_at ASC
+                """, (user_id, time_ago))
+                
+                results = cursor.fetchall()
+                
+                # Group by metric name
+                metrics = {}
+                for row in results:
+                    metric_name = row[0]
+                    if metric_name not in metrics:
+                        metrics[metric_name] = []
+                    
+                    metrics[metric_name].append({
+                        "value": row[1],
+                        "recorded_at": row[2],
+                        "notes": row[3]
+                    })
+                
+                return metrics
+            finally:
+                conn.close()
+
+    def get_topics_for_timeframe(self, user_id: str, timeframe: str) -> List[Dict[str, Any]]:
+        """
+        Get topics that were active within a specific timeframe
+        
+        Args:
+            user_id: The user's ID
+            timeframe: 'daily' or 'weekly'
+            
+        Returns:
+            List of topics active in this timeframe
+        """
+        with self.lock:
+            conn = self.get_connection()
+            try:
+                cursor = conn.cursor()
+                
+                # Calculate the start time based on timeframe
+                if timeframe == "daily":
+                    time_ago = "1 day"
+                elif timeframe == "weekly":
+                    time_ago = "7 days"
+                else:
+                    raise ValueError(f"Unsupported timeframe: {timeframe}")
+                
+                cursor.execute("""
+                SELECT name, relevance_score, first_mentioned, last_mentioned, mention_count
+                FROM topics
+                WHERE user_id = ? 
+                AND last_mentioned >= datetime('now', '-' || ?)
+                ORDER BY relevance_score * mention_count DESC
+                """, (user_id, time_ago))
+                
+                results = cursor.fetchall()
+                return [
+                    {
+                        "name": row[0],
+                        "relevance": row[1],
+                        "first_mentioned": row[2],
+                        "last_mentioned": row[3],
+                        "mention_count": row[4]
+                    }
+                    for row in results
+                ]
+            finally:
+                conn.close()

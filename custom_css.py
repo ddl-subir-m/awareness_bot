@@ -56,13 +56,15 @@ css = """
     
     /* Chat container styles */
     .chat-container {
-        height: 400px;
+        height: calc(60vh - 100px);
         overflow-y: auto;
         border: 1px solid #ddd;
         border-radius: 5px;
         padding: 1rem;
         margin-bottom: 1rem;
         background-color: #ffffff;
+        display: flex;
+        flex-direction: column;
     }
     
     /* Custom scrollbar styling */
@@ -82,6 +84,23 @@ css = """
     
     .chat-container::-webkit-scrollbar-thumb:hover {
         background: #6A0DAD;
+    }
+    
+    /* Add styles for the chat input area */
+    .chat-input-area {
+        position: relative;
+        bottom: 0;
+        width: 100%;
+        padding: 1rem;
+        background-color: #ffffff;
+        border-top: 1px solid #ddd;
+    }
+    
+    /* Add styles for the chat messages container */
+    .chat-messages {
+        flex-grow: 1;
+        overflow-y: auto;
+        margin-bottom: 1rem;
     }
 </style>
 """

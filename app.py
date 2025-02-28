@@ -1,12 +1,15 @@
 import streamlit as st
 import openai
+from summary_scheduler import SummaryScheduler
+
 from pathlib import Path
-from prompts import NERVOUS_SYSTEM_PROMPTS, ADDITIONAL_PROMPTS, get_default_instructions
+from prompts import NERVOUS_SYSTEM_PROMPTS, ADDITIONAL_PROMPTS, get_default_instructions, ADDITIONAL_COACHING_PROMPT
 from custom_css import css
 from database import DatabaseManager
 from memory_processor import MemoryProcessor
-from logging_config import setup_logging
-import logging
+from context_manager import ContextManager  
+from logging_config import setup_logging, log_llm_request, log_llm_response
+from datetime import datetime, timedelta
 
 # Configure logging
 logger = setup_logging()
@@ -53,6 +56,12 @@ if 'current_prompt' not in st.session_state:
     st.session_state.current_prompt = ""
 if 'current_input' not in st.session_state:
     st.session_state.current_input = ""
+if 'summary_scheduler' not in st.session_state:
+    st.session_state.summary_scheduler = None
+if 'memory_processor' not in st.session_state:
+    st.session_state.memory_processor = None
+
+
 
 # Initialize database in session state
 if 'db' not in st.session_state:
@@ -61,85 +70,71 @@ if 'db' not in st.session_state:
 # Initialize conversation history
 st.session_state.conversation_history = []
 
-# AI interaction functions
-def get_ai_response(prompt, model="gpt-4o-mini"):
+def initialize_memory_services():
+    """Initialize memory processor and summary scheduler if needed"""
+    if 'api_key' in st.session_state and st.session_state.api_key:
+        # Initialize memory processor
+        if 'memory_processor' not in st.session_state or not st.session_state.memory_processor:
+            st.session_state.memory_processor = MemoryProcessor(st.session_state.api_key, st.session_state.db)
+            logger.info("Memory processor initialized")
+            
+        # Initialize summary scheduler
+        if 'summary_scheduler' not in st.session_state or not st.session_state.summary_scheduler:
+            st.session_state.summary_scheduler = SummaryScheduler(
+                st.session_state.api_key, 
+                st.session_state.db,
+                st.session_state.memory_processor
+            )
+            st.session_state.summary_scheduler.start()
+            logger.info("Summary scheduler initialized and started")
+
+def on_shutdown():
+    """Stop background processes on application shutdown"""
+    if 'summary_scheduler' in st.session_state and st.session_state.summary_scheduler:
+        st.session_state.summary_scheduler.stop()
+        logger.info("Summary scheduler stopped on shutdown")
+
+def initialize_context_manager():
+    """Initialize the context manager if it doesn't exist in session state"""
+    if 'context_manager' not in st.session_state and 'api_key' in st.session_state and st.session_state.api_key:
+        st.session_state.context_manager = ContextManager(st.session_state.api_key)
+        logger.info("Context manager initialized")
+
+
+
+def get_enhanced_ai_response(prompt, model="gpt-4o-mini"):
+    """
+    Enhanced version of get_ai_response that uses the context manager
+    for better context understanding and personalization.
+    
+    Args:
+        prompt: The user's message
+        model: The model to use
+        
+    Returns:
+        The AI's response
+    """
     if not st.session_state.api_key:
         return "Please add your OpenAI API key in the settings to use the AI coach."
     
     try:
-        # Initialize OpenAI client if not already done
-        if not st.session_state.openai_client:
-            st.session_state.openai_client = openai.OpenAI(api_key=st.session_state.api_key)
-        
-        # Initialize memory processor
-        memory_processor = MemoryProcessor(st.session_state.api_key, st.session_state.db)
-        
-        # Get relevant context
-        context = memory_processor.get_relevant_context(prompt, st.session_state.user_id)
-        
-        messages = []
-        
-        # Add system instructions
-        messages.append({
-            "role": "system",
-            "content": st.session_state.custom_instructions
-        })
-        
-        # Add memory context if available
-        if context:
-            context_str = "Relevant context from our previous conversations:\n"
-            for item in context.get("items", []):
-                context_str += f"- {item['content']} (relevance: {item['relevance_score']}/10)\n"
-            messages.append({
-                "role": "assistant",
-                "content": f"Let me recall our previous discussions: {context_str}"
-            })
-        
-        # Add recent conversation history
-        for msg in st.session_state.conversation_history[-5:]:
-            messages.append({
-                "role": msg["role"],
-                "content": msg["content"]
-            })
-        
-        # Add the current prompt
-        messages.append({
-            "role": "user",
-            "content": prompt
-        })
-
-        # Log the messages being sent (fixed version)
-        logger.info("Sending messages to OpenAI API from get_ai_response:")
-        logger.info(f"Total messages: {len(messages)}")
-        if logger.isEnabledFor(logging.DEBUG):
-            for idx, msg in enumerate(messages):
-                logger.info(f"Message {idx + 1}:")
-                logger.info(f"Role: {msg['role']}")
-                logger.info(f"Content: {msg['content']}\n")
-        
-        # Get response using the stored client
-        response = st.session_state.openai_client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=1500
-        )
-        
-        # Update conversation history in session state
-        st.session_state.conversation_history.append({"role": "user", "content": prompt})
-        st.session_state.conversation_history.append({"role": "assistant", "content": response.choices[0].message.content})
-        
-        # Process conversation for memory
-        memory_processor.process_conversation(
+        # Initialize context manager if needed
+        initialize_context_manager()
+               
+        # Get response using context manager
+        logger.info(f"Getting enhanced AI response using {model}")
+        response = st.session_state.context_manager.get_ai_response(
             st.session_state.user_id,
-            {"role": "user", "content": prompt}
+            prompt,
+            model
         )
         
-        return response.choices[0].message.content
+        return response
         
     except Exception as e:
-        logger.error(f"Error in get_ai_response: {str(e)}")
+        logger.error(f"Error in get_enhanced_ai_response: {str(e)}", exc_info=True)
         return f"Error communicating with AI service: {str(e)}"
+
 
 # Replace profile loading function
 def load_profile(name, passphrase):
@@ -177,7 +172,7 @@ st.sidebar.markdown("## Navigation")
 navigation = st.sidebar.radio(
     "Go to:",
     ["1. Vibe Engineering", 
-     "2. Create Your Nervous System Codex Vitae", 
+     "2. Create Your Codex Vitae", 
      "3. Chat with Your Coach"],
     index=st.session_state.step - 1
 )
@@ -193,6 +188,7 @@ with st.sidebar.expander("Configure AI Settings"):
     if api_key:
         st.session_state.api_key = api_key
         st.session_state.openai_client = openai.OpenAI(api_key=api_key)
+        initialize_memory_services() 
         
     # Model selection
     selected_model = st.selectbox(
@@ -206,30 +202,94 @@ with st.sidebar.expander("Configure AI Settings"):
 
 st.sidebar.markdown("---")
 
-# Add to your sidebar section
+   
+
 with st.sidebar.expander("🧠 Memory Management"):
     st.markdown("### Conversation Memory")
     
-    # View summaries
-    if st.button("View Memory Summaries"):
-        daily_summary = st.session_state.db.get_latest_summary(
-            st.session_state.user_id, "daily"
-        )
-        weekly_summary = st.session_state.db.get_latest_summary(
-            st.session_state.user_id, "weekly"
-        )
-        
-        st.markdown("#### Daily Summary")
-        st.json(daily_summary["summary"] if daily_summary else {})
-        
-        st.markdown("#### Weekly Summary")
-        st.json(weekly_summary["summary"] if weekly_summary else {})
+    tabs = st.tabs(["Summaries", "Generate", "Manage"])
     
-    # Clear recent conversations
-    if st.button("Clear Recent Conversations"):
-        st.session_state.conversation_history = []
-        st.success("Recent conversations cleared!")
-
+    with tabs[0]:  # Summaries
+        summary_type = st.radio("Summary Type:", ["Daily", "Weekly"])
+        timeframe = summary_type.lower()
+        
+        if st.button("Refresh Summary"):
+            summary = st.session_state.db.get_latest_summary(
+                st.session_state.user_id, timeframe
+            )
+            st.session_state.current_summary = summary
+        
+        # Get current summary
+        if 'current_summary' not in st.session_state:
+            summary = st.session_state.db.get_latest_summary(
+                st.session_state.user_id, timeframe
+            )
+            st.session_state.current_summary = summary
+        else:
+            summary = st.session_state.current_summary
+        
+        if summary and 'summary' in summary:
+            summary_data = summary["summary"]
+            st.markdown(f"*Last updated: {summary.get('last_updated', 'unknown')}*")
+            
+            # Display summary data if available
+            for field in ["key_themes", "emotional_journey", "insights_gained", 
+                         "progress_made", "action_items", "recommended_focus"]:
+                if field in summary_data and summary_data[field]:
+                    # Format field name for display
+                    display_name = field.replace('_', ' ').title()
+                    st.markdown(f"**{display_name}:**")
+                    
+                    # Different display based on field type
+                    if isinstance(summary_data[field], list):
+                        for item in summary_data[field]:
+                            st.markdown(f"• {item}")
+                    else:
+                        st.markdown(summary_data[field])
+                    
+                    st.markdown("---")
+        else:
+            st.info(f"No {timeframe} summary available yet.")
+    
+    with tabs[1]:  # Generate Summaries
+        st.markdown("Generate summaries manually:")
+        
+        summary_type_gen = st.radio("Summary to Generate:", ["Daily", "Weekly"], key="gen_summary_type")
+        if st.button("Generate Summary Now"):
+            if not st.session_state.api_key:
+                st.error("Please add your OpenAI API key in the settings to generate summaries.")
+            else:
+                timeframe = summary_type_gen.lower()
+                
+                # Make sure memory processor is initialized
+                if 'memory_processor' not in st.session_state or not st.session_state.memory_processor:
+                    st.session_state.memory_processor = MemoryProcessor(st.session_state.api_key, st.session_state.db)
+                
+                # Generate the summary
+                with st.spinner(f"Generating {timeframe} summary..."):
+                    try:
+                        st.session_state.memory_processor.generate_timeframe_summary(
+                            st.session_state.user_id, timeframe
+                        )
+                        
+                        # Update current summary in session state
+                        summary = st.session_state.db.get_latest_summary(
+                            st.session_state.user_id, timeframe
+                        )
+                        st.session_state.current_summary = summary
+                        
+                        st.success(f"{summary_type_gen} summary generated!")
+                    except Exception as e:
+                        st.error(f"Error generating summary: {str(e)}")
+    
+    with tabs[2]:  # Manage Memory
+        st.markdown("Manage conversation memory:")
+        
+        # Clear recent conversations
+        if st.button("Clear Recent Conversations"):
+            st.session_state.conversation_history = []
+            st.success("Recent conversations cleared!")
+            
 st.sidebar.markdown("---")
 
 with st.sidebar.expander("⚠️ Danger Zone"):
@@ -244,12 +304,24 @@ with st.sidebar.expander("⚠️ Danger Zone"):
             st.success("Database cleared successfully!")
             st.rerun()
 
+# Register the shutdown handler
+# In Streamlit, we can't directly register shutdown handlers
+# But we can check for session resets
+if 'initialized' not in st.session_state:
+    st.session_state.initialized = True
+else:
+    # If the script is rerun but initialized is already set, 
+    # we might need to restart background processes
+    if 'summary_scheduler' in st.session_state and st.session_state.summary_scheduler:
+        if not hasattr(st.session_state.summary_scheduler, 'thread') or not st.session_state.summary_scheduler.thread.is_alive():
+            logger.info("Restarting summary scheduler after session refresh")
+            st.session_state.summary_scheduler.start()
 
 # Main content
 def main():
     # Landing page with profile creation/loading
     if not st.session_state.user_id:
-        st.markdown('<div class="main-header">Welcome to Your Nervous System AI Coach</div>', unsafe_allow_html=True)
+        st.markdown('<div class="main-header">Welcome to Your Wellness AI Coach</div>', unsafe_allow_html=True)
         
         # Create tabs for new profile and existing profile
         login_tab, create_tab = st.tabs(["Load Existing Profile", "Create New Profile"])
@@ -498,60 +570,43 @@ Select questions that resonate with you and answer them one by one to build your
 
                 # Right column - Chat Interface
                 with right_col:
-                    # Add a vertical divider using CSS
-                    st.markdown("""
-                        <style>
-                        [data-testid="stVerticalBlock"] > [style*="flex-direction: column;"] > [data-testid="stVerticalBlock"]:nth-of-type(2) {
-                            border-left: 1px solid #ddd;
-                            padding-left: 2rem;
-                        }
-                        </style>
-                    """, unsafe_allow_html=True)
-                    
                     st.markdown("### Chat with Your Coach")
                     st.markdown("""<div class="highlight-box">
                     Chat with your AI coach using your own messages or the prompt library.
                     </div>""", unsafe_allow_html=True)
                     
-                    # Display conversation history
-                    st.markdown('<div class="chat-container">', unsafe_allow_html=True)
-                    chat_container = st.container()
-                    with chat_container:
-                        
-                        # Only show messages if user is logged in and has conversation history
+                    # Create a container for the entire chat interface
+                    chat_interface = st.container()
+                    
+                    with chat_interface:
+                        # Messages container
+                        st.markdown('<div class="chat-messages">', unsafe_allow_html=True)
                         if st.session_state.user_id:
-                            # Fetch fresh conversation history from database
                             conversation_history = st.session_state.db.get_conversation_history(st.session_state.user_id)
-                            
-                            # Add debug print to check database results
-                            print(f"Database conversation history: {conversation_history}")
-                            
-                            # Only display messages if they exist in the database
                             if conversation_history:
                                 for msg in conversation_history:
                                     role_emoji = "👤" if msg["role"] == "user" else "🤖"
                                     with st.chat_message(msg["role"], avatar=role_emoji):
                                         st.markdown(msg["content"])
-                    st.markdown('</div>', unsafe_allow_html=True)
-                    
-                    # Chat input at the bottom
-                    if 'current_input' not in st.session_state:
-                        st.session_state.current_input = ""
-
-                    # Create a container for the chat input and send button
-                    input_container = st.container()
-                    with input_container:
-                        cols = st.columns([0.92, 0.08])  # Adjust ratio for better alignment
+                        st.markdown('</div>', unsafe_allow_html=True)
+                        
+                        # Chat input area
+                        st.markdown('<div class="chat-input-area">', unsafe_allow_html=True)
+                        if 'current_input' not in st.session_state:
+                            st.session_state.current_input = ""
+                            
+                        cols = st.columns([0.92, 0.08])
                         with cols[0]:
                             user_input = st.text_area(
                                 "Type your message here...",
                                 value=st.session_state.current_input,
                                 height=100,
                                 key="chat_input",
-                                label_visibility="collapsed"  # Hide label for cleaner look
+                                label_visibility="collapsed"
                             )
                         with cols[1]:
                             send_button = st.button("↑", key="send_button", use_container_width=True)
+                        st.markdown('</div>', unsafe_allow_html=True)
 
                     if send_button and user_input:
                         if not st.session_state.api_key:
@@ -561,17 +616,37 @@ Select questions that resonate with you and answer them one by one to build your
                             st.session_state.current_input = ""
                             
                             try:
-                                # Save user message to database
-                                st.session_state.db.save_conversation(st.session_state.user_id, "user", message_to_send)
+                                # First check if this exact message exists in recent history
+                                recent_messages = st.session_state.db.get_conversation_history(st.session_state.user_id)[-5:]
+                                is_duplicate = any(
+                                    msg['role'] == "user" and 
+                                    msg['content'] == message_to_send and 
+                                    (datetime.fromisoformat(msg.get('timestamp', datetime.now().isoformat())) > datetime.now() - timedelta(minutes=1))
+                                    for msg in recent_messages
+                                )
                                 
-                                # Get AI response
-                                response = get_ai_response(message_to_send)
-                                
-                                # Save AI response to database
-                                st.session_state.db.save_conversation(st.session_state.user_id, "assistant", response)
-                                
-                                # Force a rerun to refresh the chat display
-                                st.rerun()
+                                if not is_duplicate:
+                                    # Save user message to database
+                                    message_id = st.session_state.db.save_conversation(
+                                        st.session_state.user_id, 
+                                        "user", 
+                                        message_to_send
+                                    )
+                                    
+                                    # Get AI response
+                                    response = get_enhanced_ai_response(message_to_send)
+                                    
+                                    # Save AI response to database
+                                    st.session_state.db.save_conversation(
+                                        st.session_state.user_id, 
+                                        "assistant", 
+                                        response
+                                    )
+                                    
+                                    # Force a rerun to refresh the chat display
+                                    st.rerun()
+                                else:
+                                    st.warning("Duplicate message detected - not processing")
                             except Exception as e:
                                 st.error(f"Error processing message: {str(e)}")
 
